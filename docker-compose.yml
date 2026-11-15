@@ -4,17 +4,23 @@ services:
       context: .
       target: runtime
     image: kis-trader:local
+    # 모의투자 실접속 검증 전까지는 --dry-run (주문 전송 안 함). 검증 후 ["run"] 으로 바꾼다.
+    command: ["run", "--dry-run"]
     container_name: kis-trader
     restart: unless-stopped
     user: "1000:1000"
+    # .env 는 텔레그램(TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)용. 앱키·계좌는 config.yaml
     env_file: .env
     environment:
       TZ: Asia/Seoul
       DATA_DIR: /app/data
       LOG_DIR: /app/logs
+      # 종가 스캔(~8분)·장후 스캔(~15분) 동안 heartbeat 가 멈추므로 여유 있게
+      HEARTBEAT_MAX_AGE_SEC: "1800"
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      - ./config.yaml:/app/config.yaml:ro
     # 최소 권한
     read_only: true
     tmpfs:
@@ -23,7 +29,8 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 256m
+    # v2 는 pandas 로 종목 800개 일봉을 다루므로 v1(256m)보다 크게
+    mem_limit: 768m
     pids_limit: 128
     # 외부로 열리는 포트 없음 (ports 항목 없음)
     logging:

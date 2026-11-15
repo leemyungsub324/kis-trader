@@ -132,3 +132,24 @@ tests/            단위 테스트 27개
 ```
 
 투자 판단과 손익의 책임은 사용자에게 있습니다. 과거 검증 결과가 앞으로의 수익을 보장하지 않습니다.
+
+## 8. 이 저장소에서의 운영 (Docker, v1 에서 유지한 것)
+
+```bash
+cd ~/stacks/kis-trader
+cp config.example.yaml config.yaml && chmod 600 config.yaml   # 모의 앱키·시크릿·계좌
+cp .env.example .env && chmod 600 .env                        # 텔레그램 (선택)
+sudo docker build --target test .        # 단위 테스트 (requirements 설치 후 python -m pytest tests -q)
+sudo docker compose up -d --build        # 실행 (명령은 docker-compose.yml 의 command)
+sudo docker compose logs -f
+sudo docker inspect -f '{{.State.Health.Status}}' kis-trader
+sudo docker compose run --rm kis-trader status     # 다른 명령도 같은 방식 (scan, report ...)
+```
+
+- `docker-compose.yml` 의 `command` 는 모의투자 실접속 검증 전까지 `["run", "--dry-run"]` 이다.
+- 로그: `logs/kis-trader.log` (JSON, 5MB x 5 로테이션, 앱키·시크릿·계좌·토큰 마스킹).
+- 상태·캐시·토큰: `data/` (state.json, trades.csv, daily/, .token_mock.json, heartbeat).
+- 텔레그램: 시작, 체결, 당일 손실 한도, 루프 오류(첫 회·종료 시), 장후 일일 요약.
+- 헬스체크: 엔진 루프가 `data/heartbeat` 를 갱신한다. 종가·장후 스캔이 길어 허용 나이는 30분.
+- 컨테이너: 비root(uid 1000), 읽기 전용 루트, cap_drop ALL, 메모리 768MB, 열린 포트 없음, `restart: unless-stopped`.
+- v1 의 HALT 파일·가드 한도는 없다. 신규 매수 중단은 `data/STOP` 파일과 `daily_loss_limit` 이다.
