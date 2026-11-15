@@ -1,0 +1,58 @@
+# 복사해서 config.yaml 로 저장한 뒤 수정하세요. (config.yaml 은 git에 올리지 마세요)
+env: mock                 # mock: 모의투자 / real: 실전 (실전은 run --real-money 를 붙여야 주문됨)
+app_key: ""               # 환경변수 KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT 로 넣어도 됩니다
+app_secret: ""
+account: "12345678-01"    # 계좌번호 8자리-상품코드 2자리
+
+data_dir: data
+index_code: "069500"      # 시장 국면 판정용 (KODEX 200)
+capital: null             # 이 프로그램이 굴릴 금액(원). null이면 계좌 총평가금액 기준
+daily_loss_limit: 0.05    # 당일 계좌 -5%면 신규 매수 중단 (capital 지정 시에는 동작하지 않음)
+poll_seconds: 20          # 장중 감시 주기
+close_scan_start: "14:58" # 종가베팅 스캔 시작 시각 (모의투자는 초당 2건 제한이라 약 8분 소요)
+scan_min_value: 1.0e+9    # 종가 스캔 대상: 20일 평균 거래대금 10억 이상
+
+# 남는 현금을 지수 ETF에 넣어 두기. 종목 발굴 실력이 아니라 시장 노출을 더하는 것입니다. 끄려면 이 블록을 지우세요.
+park:
+  code: "069500"          # KODEX 200
+  frac: 0.5               # 남는 현금의 50%
+  regimes: ["BULL"]       # 상승 국면에서만 보유
+
+universe:
+  min_price: 1000         # 코스피 보통주 전체에서 1,000원 미만 제외
+  # codes: ["005930", "000660"]   # 직접 지정하면 이 종목만 대상
+
+costs:                    # 백테스트 비용 가정
+  fee: 0.00015            # 편도 수수료
+  tax: 0.0020             # 매도 시 증권거래세 (2026년 0.20%)
+  slip_close: 0.001       # 종가·시가 체결 슬리피지
+  slip_stop: 0.002        # 손절 슬리피지
+
+strategies:
+  reversal:               # R. 투매 반등 (시장 급락 시 과매도 종목 지정가 분할 매수)
+    max_positions: 4
+    pos_weight: 0.20      # 종목당 자산의 20%
+    drop5: -0.15          # 종목 5일 수익률 -15% 이하
+    rsi_max: 30           # RSI(14) 30 미만
+    mkt_ret5: -0.04       # 지수 5일 -4% 이하 이거나
+    mkt_dd20: -0.07       # 지수 20일 고점 대비 -7% 이하일 때만
+    ladder_ticks: [-3, -6, -10]     # 전일 종가 대비 틱
+    ladder_weights: [0.4, 0.3, 0.3]
+    tp_pct: 0.12          # +12% 익절
+    stop_pct: 0.15        # -15% 손절
+    max_hold: 10          # 최대 10거래일
+    # --- 선택 사항 (기본은 꺼짐) ---
+    # confirm: mkt_up     # 지수가 오른 날에만 신호 인정 → 폭락 초입 진입을 피함(낙폭↓, 거래 수·수익↓)
+    # vol_target: 0.04    # 변동성 큰 종목은 비중을 줄임(낙폭↓, 수익↓)
+    # ladder_atr: [-0.2, -0.5, -0.8]   # 틱 대신 ATR 배수로 주문가 계산(체결률↓, 거래당 수익↑)
+  surge:                  # S. 급등주 종가베팅 (장 마감 직전 매수 → 다음날 시가 매도)
+    max_positions: 3
+    pos_weight: 0.15
+    vol_mult: 5           # 거래량이 20일 평균의 5배 이상
+    chg_min: 0.07
+    chg_max: 0.20
+    clv_min: 0.8          # 당일 고가 부근 마감
+  # 아래는 검증에서 기대값이 0 이하였던 규칙입니다. 모의투자에서 직접 확인하고 싶을 때만 켜세요.
+  # breakout: {}          # 20일 신고가 돌파 스윙
+  # pullback: {}          # 상승 추세 RSI(2) 눌림목
+  # vb: {}                # 변동성 돌파

@@ -1,0 +1,6 @@
+pandas>=2.0
+numpy
+requests
+pyyaml
+pyarrow        # 백테스트(marcap parquet)용
+pytest         # 테스트용
