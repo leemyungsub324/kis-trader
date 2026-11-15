@@ -1,0 +1,24 @@
+[project]
+name = "kis-trader"
+version = "0.1.0"
+description = "한국투자증권 Open API 모의투자 자동매매 뼈대 (기본: 관찰 전략, 주문 없음)"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27,<1",
+    "pydantic>=2.7,<3",
+    "pydantic-settings>=2.3,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

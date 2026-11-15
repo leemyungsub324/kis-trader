@@ -1,0 +1,39 @@
+services:
+  kis-trader:
+    build:
+      context: .
+      target: runtime
+    image: kis-trader:local
+    container_name: kis-trader
+    restart: unless-stopped
+    user: "1000:1000"
+    env_file: .env
+    environment:
+      TZ: Asia/Seoul
+      DATA_DIR: /app/data
+      LOG_DIR: /app/logs
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    # 최소 권한
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 128
+    # 외부로 열리는 포트 없음 (ports 항목 없음)
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-m", "kis_trader.healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s

@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
