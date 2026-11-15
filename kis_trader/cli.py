@@ -14,6 +14,7 @@ import logging
 import os
 import sys
 import urllib.request
+from pathlib import Path
 
 import pandas as pd
 import yaml
@@ -34,9 +35,10 @@ def load_cfg(path: str) -> dict:
     return cfg
 
 
-def make_engine(cfg, dry_run=False, allow_real=False):
+def make_engine(cfg, dry_run=False, allow_real=False, notify=False):
     from .engine import DryBroker, Engine
     from .kis_api import KisClient
+    from .notify import Notifier
     for k in ("app_key", "app_secret", "account"):
         if not cfg.get(k):
             sys.exit(f"설정 누락: {k} (config.yaml 또는 환경변수 KIS_APP_KEY / KIS_APP_SECRET / KIS_ACCOUNT)")
@@ -45,7 +47,8 @@ def make_engine(cfg, dry_run=False, allow_real=False):
     broker = KisClient(cfg["app_key"], cfg["app_secret"], cfg["account"], cfg["env"], token_dir=cfg["data_dir"])
     if dry_run:
         broker = DryBroker(broker)
-    return Engine(broker, build(cfg.get("strategies")), cfg, data_dir=cfg["data_dir"])
+    return Engine(broker, build(cfg.get("strategies")), cfg, data_dir=cfg["data_dir"],
+                  notify=Notifier.from_cfg(cfg) if notify else None)
 
 
 def universe_fn(cfg):
@@ -101,8 +104,9 @@ def cmd_scan(a, cfg):
 
 
 def cmd_run(a, cfg):
-    e = make_engine(cfg, dry_run=a.dry_run, allow_real=a.real_money)
+    e = make_engine(cfg, dry_run=a.dry_run, allow_real=a.real_money, notify=True)
     logging.getLogger().info("시작: env=%s dry_run=%s 전략=%s", cfg["env"], a.dry_run, list(e.S))
+    e.notify.send(f"[시작] kis-trader v2 env={cfg['env']} dry_run={a.dry_run} 전략={list(e.S)}")
     e.run(universe_fn(cfg), poll=cfg.get("poll_seconds", 20))
 
 
@@ -156,8 +160,12 @@ def main(argv=None):
     a = ap.parse_args(argv)
     cfg = load_cfg(a.config)
     os.makedirs(cfg["data_dir"], exist_ok=True)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-                        handlers=[logging.StreamHandler(), logging.FileHandler(os.path.join(cfg["data_dir"], "kis_trader.log"), encoding="utf-8")])
+    # v1 과 같은 로그: logs/kis-trader.log (JSON, 5MB x 5 로테이션, 비밀값 마스킹)
+    from .logging_setup import register_secrets, setup_logging
+    tg = cfg.get("telegram") or {}
+    register_secrets([cfg.get("app_key", ""), cfg.get("app_secret", ""), str(cfg.get("account", "")).split("-")[0],
+                      os.environ.get("TELEGRAM_BOT_TOKEN", ""), tg.get("bot_token", "")])
+    setup_logging(Path(os.environ.get("LOG_DIR") or cfg.get("log_dir", "logs")), cfg.get("log_level", "INFO"))
     a.fn(a, cfg)
 
 

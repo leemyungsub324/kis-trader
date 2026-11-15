@@ -21,6 +21,7 @@ from datetime import datetime
 import pandas as pd
 
 from .indicators import add_features
+from .notify import NullNotifier
 from .regime import market_features
 from .ticks import shift
 
@@ -50,8 +51,9 @@ class DryBroker:
 
 
 class Engine:
-    def __init__(self, broker, strategies, cfg: dict, data_dir: str = "data", now=datetime.now):
+    def __init__(self, broker, strategies, cfg: dict, data_dir: str = "data", now=datetime.now, notify=None):
         self.b, self.cfg, self.now = broker, cfg, now
+        self.notify = notify or NullNotifier()
         self.S = {s.name: s for s in strategies}
         self.data_dir = data_dir
         self.daily_dir = os.path.join(data_dir, "daily")
@@ -83,6 +85,7 @@ class Engine:
                 w.writerow(["time", "strat", "code", "side", "qty", "price", "why"])
             w.writerow([self.now().strftime("%Y-%m-%d %H:%M:%S"), strat, code, side, qty, round(price, 2), why])
         log.info("체결 %s %s %s %d주 @%.0f (%s)", strat, code, side, qty, price, why)
+        self.notify.send(f"[체결] {strat} {code} {'매수' if side == 'buy' else '매도'} {qty}주 @{price:,.0f} ({why})")
 
     def _roll_day(self):
         """거래일이 바뀌면 보유일수를 늘리고 전일 주문 기록을 비운다."""
@@ -462,6 +465,7 @@ class Engine:
         eq = self.b.balance()["equity"]
         if eq < self.st["equity0"] * (1 - lim):
             log.warning("당일 손실 한도(%.0f%%) 초과 → 신규 매수 중단", lim * 100)
+            self.notify.send(f"[경고] 당일 손실 한도 {lim:.0%} 초과 → 오늘 신규 매수 중단")
             self.st["halt_entries"] = True
             for o in self.st["orders"]:
                 if o["open"] and o["kind"] == "entry":
@@ -548,6 +552,7 @@ class Engine:
         """하루 종일 도는 메인 루프. universe_fn()은 종목 목록 DataFrame을 돌려준다."""
         uni, fails = None, 0
         while True:
+            self._beat()
             t = self.now().strftime("%H:%M")
             wd = self.now().weekday() < 5
             try:
@@ -571,11 +576,42 @@ class Engine:
                     self.sync_fills()
                     self.eod_scan(uni)
                     uni = None
+                    self._daily_summary()
                 fails = 0
             except Exception:
                 fails += 1
                 log.exception("루프 오류 (%d회 연속)", fails)
+                if fails == 1:
+                    self.notify.send("[오류] 매매 루프 오류 발생. 로그를 확인하세요 (같은 오류가 이어져도 10회째까지 다시 알리지 않음).")
                 if fails >= 10:
                     log.error("연속 오류 10회 → 종료. 미체결 주문과 잔고를 직접 확인하세요.")
+                    self.notify.send("[중단] 연속 오류 10회 → 프로그램 종료. 미체결 주문과 잔고를 직접 확인하세요.")
                     raise
             time.sleep(poll)
+
+    # ------------------------------------------------------------------ 운영 (v1 에서 이식)
+    def _beat(self):
+        """Docker 헬스체크용 heartbeat (kis_trader.healthcheck 가 파일 신선도를 본다)."""
+        try:
+            with open(os.path.join(self.data_dir, "heartbeat"), "w") as f:
+                f.write(str(time.time()))
+        except OSError:
+            log.warning("heartbeat 기록 실패")
+
+    def _daily_summary(self):
+        """장후 텔레그램 일일 요약: 평가금액, 보유, 오늘 체결 건수, 내일 후보 수."""
+        if not self.notify.enabled:
+            return
+        today = self.now().strftime("%Y-%m-%d")
+        n = 0
+        if os.path.exists(self.trades_path):
+            with open(self.trades_path, newline="") as f:
+                n = sum(1 for r in csv.DictReader(f) if r["time"].startswith(today))
+        try:
+            eq = f"{self.b.balance()['equity']:,.0f}원"
+        except Exception:
+            eq = "조회 실패"
+        pos = ", ".join(f"{c}({p['strat']} {p['qty']}주)" for c, p in self.st["positions"].items()) or "없음"
+        park = self.st.get("park", {}).get("qty", 0)
+        self.notify.send(f"[일일 요약 {today}] 국면 {self.st['regime']} | 평가금액 {eq}\n"
+                         f"보유: {pos} | 지수ETF {park}주\n오늘 체결 {n}건 | 내일 후보 {len(self.st.get('plans', []))}건")
