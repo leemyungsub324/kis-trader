@@ -19,8 +19,10 @@ class Reversal(Strategy):
     rsi_max: float = 30.0        # RSI(14) 상한
     crash_chg: float = -0.08     # 당일 등락률이 이보다 낮고
     crash_vol: float = 3.0       # 거래량이 평균의 이 배수 이상이면 제외(악재성 폭락)
+    crash_days: int = 1          # 최근 N거래일 안에 위 '악재성 폭락'이 하루라도 있으면 제외(1=신호일만)
     mkt_ret5: float = -0.04      # 지수 5일 수익률이 이 이하이거나
     mkt_dd20: float = -0.07      # 지수가 20일 고점 대비 이만큼 빠졌을 때만 매수
+    mkt_ret5_max: float | None = None   # 지정 시 지수 5일 수익률이 이 값 이하일 때만(이미 반등한 장의 낡은 신호 제외)
     confirm: str = ""            # "stock_up": 신호일 종목 양봉 / "mkt_up": 신호일 지수 상승 (반등 확인 후 진입)
     exit_rule: str = ""          # "ma5": 종가가 5일선 위로 올라오면 청산
     rank_by: str = "liquid"       # drop: 낙폭 큰 순 / liquid: 거래대금 큰 순
@@ -40,7 +42,11 @@ class Reversal(Strategy):
         ret5 = c / c.shift(5) - 1
         r14 = rsi(c, 14)
         crash = (f["chg"] <= self.crash_chg) & (f["vol_ratio"] >= self.crash_vol)
+        if self.crash_days > 1:
+            crash = crash.astype(float).rolling(self.crash_days, min_periods=1).max().astype(bool)
         panic = (m["ret5"] <= self.mkt_ret5) | (m["dd20"] <= self.mkt_dd20) if m is not None else True
+        if m is not None and self.mkt_ret5_max is not None:
+            panic = panic & (m["ret5"] <= self.mkt_ret5_max)
         sig = (ret5 <= self.drop5) & (r14 < self.rsi_max) & ~crash & panic \
             & (f["val_ma20"] >= self.min_val20) & tradable(f)
         if self.confirm == "stock_up":

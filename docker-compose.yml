@@ -4,8 +4,8 @@ services:
       context: .
       target: runtime
     image: kis-trader:local
-    # 모의투자 실접속 검증 전까지는 --dry-run (주문 전송 안 함). 검증 후 ["run"] 으로 바꾼다.
-    command: ["run", "--dry-run"]
+    # 모의투자 실접속 검증 완료 → 실주문 전송. 주문 없이 돌리려면 ["run", "--dry-run"].
+    command: ["run"]
     container_name: kis-trader
     restart: unless-stopped
     user: "1000:1000"

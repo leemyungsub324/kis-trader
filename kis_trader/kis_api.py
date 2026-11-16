@@ -1,7 +1,8 @@
 """한국투자증권 Open API(REST) 클라이언트.
 
 TR ID·파라미터는 공식 저장소(github.com/koreainvestment/open-trading-api) 예제 기준이다.
-모의투자에서 지원하지 않는 API(거래량순위, 정정취소가능주문조회, 휴장일조회)는 쓰지 않는다.
+모의투자에서 지원하지 않는 API(정정취소가능주문조회, 휴장일조회)는 쓰지 않는다.
+거래량순위·등락률순위·업종지수는 2026-11-16 모의서버에서 정상 응답을 확인했다(시황 브리핑용).
 """
 from __future__ import annotations
 
@@ -129,6 +130,42 @@ class KisClient:
                     or o.get("mrkt_warn_cls_code", "00") in ("02", "03"),
             "halted": o.get("temp_stop_yn", "N") == "Y" or o.get("iscd_stat_cls_code") == "58",
         }
+
+    def index_price(self, code: str = "0001") -> dict:
+        """업종지수 현재가. code: 0001 코스피, 1001 코스닥, 2001 코스피200."""
+        o = self._call("GET", "/uapi/domestic-stock/v1/quotations/inquire-index-price", "FHPUP02100000",
+                       {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": code})["output"]
+        f = lambda k: float(o.get(k) or 0)
+        return {"price": f("bstp_nmix_prpr"), "chg": f("bstp_nmix_prdy_ctrt") / 100,
+                "open": f("bstp_nmix_oprc"), "high": f("bstp_nmix_hgpr"), "low": f("bstp_nmix_lwpr"),
+                "prev": f("bstp_nmix_prpr") - f("bstp_nmix_prdy_vrss"), "value": f("acml_tr_pbmn") * 1e6,
+                "up": int(f("ascn_issu_cnt")), "down": int(f("down_issu_cnt")),
+                "upper": int(f("uplm_issu_cnt")), "lower": int(f("lslm_issu_cnt"))}
+
+    def volume_rank(self, kind: str = "value") -> list[dict]:
+        """보통주 순위 30건(ETF·ETN·우선주·관리·경고 종목 제외).
+        kind: value 거래대금순 / surge 평균거래량 대비 증가율순."""
+        d = self._call("GET", "/uapi/domestic-stock/v1/quotations/volume-rank", "FHPST01710000", {
+            "FID_COND_MRKT_DIV_CODE": "J", "FID_COND_SCR_DIV_CODE": "20171", "FID_INPUT_ISCD": "0000",
+            "FID_DIV_CLS_CODE": "1", "FID_BLNG_CLS_CODE": {"value": "3", "surge": "1"}[kind],
+            "FID_TRGT_CLS_CODE": "111111111", "FID_TRGT_EXLS_CLS_CODE": "1111111111",
+            "FID_INPUT_PRICE_1": "", "FID_INPUT_PRICE_2": "", "FID_VOL_CNT": "", "FID_INPUT_DATE_1": ""})
+        f = lambda o, k: float(o.get(k) or 0)
+        return [{"code": o["mksc_shrn_iscd"], "name": o["hts_kor_isnm"], "price": f(o, "stck_prpr"),
+                 "chg": f(o, "prdy_ctrt") / 100, "value": f(o, "acml_tr_pbmn"),
+                 "vol_ratio": f(o, "vol_inrt") / 100} for o in d.get("output") or []]
+
+    def change_rank(self, down: bool = False) -> list[dict]:
+        """등락률 순위 30건(상승률순 / down=True면 하락률순). 거래대금은 현재가×거래량 추정치."""
+        d = self._call("GET", "/uapi/domestic-stock/v1/ranking/fluctuation", "FHPST01700000", {
+            "fid_cond_mrkt_div_code": "J", "fid_cond_scr_div_code": "20170", "fid_input_iscd": "0000",
+            "fid_rank_sort_cls_code": "1" if down else "0", "fid_input_cnt_1": "0", "fid_prc_cls_code": "0",
+            "fid_input_price_1": "", "fid_input_price_2": "", "fid_vol_cnt": "", "fid_trgt_cls_code": "0",
+            "fid_trgt_exls_cls_code": "0", "fid_div_cls_code": "0", "fid_rsfl_rate1": "", "fid_rsfl_rate2": ""})
+        f = lambda o, k: float(o.get(k) or 0)
+        return [{"code": o["stck_shrn_iscd"], "name": o["hts_kor_isnm"], "price": f(o, "stck_prpr"),
+                 "chg": f(o, "prdy_ctrt") / 100, "value": f(o, "stck_prpr") * f(o, "acml_vol"),
+                 "high": f(o, "stck_hgpr"), "low": f(o, "stck_lwpr")} for o in d.get("output") or []]
 
     def daily(self, code: str, start: str, end: str) -> pd.DataFrame:
         """수정주가 일봉(최대 100건). start/end: YYYYMMDD."""

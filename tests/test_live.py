@@ -271,3 +271,111 @@ def test_atr_ladder_and_daily_entry_cap(tmp_path):
     b.set("000020", 9950, prev=10000, open_=9950)
     e.open()
     assert [(c, p) for c, _, _, p in b.sent] == [("000010", 9800), ("000010", 9600), ("000010", 9400)]
+
+
+def test_phase_schedule_runs_closing_only_in_the_afternoon(tmp_path):
+    e, b, clk = make(tmp_path)
+    assert e.phase("08:45") == "idle"          # 예전에는 여기서 closing 이 돌았다
+    assert e.phase("08:49") == "idle"
+    assert e.phase("08:50") == "preopen"
+    assert e.phase("09:00") == "idle"
+    assert e.phase("09:01") == "intraday"
+    assert e.phase("14:57") == "intraday"
+    assert e.phase("14:58") == "closing"
+    assert e.phase("15:19") == "closing"
+    assert e.phase("15:20") == "post"
+    assert e.phase("15:40") == "eod"
+    e.cfg["close_scan_start"] = "15:00"
+    assert e.phase("14:58") == "intraday" and e.phase("15:00") == "closing"
+
+
+def test_position_is_not_sold_on_entry_day_or_before_max_hold(tmp_path):
+    e, b, clk = make(tmp_path, "2026-11-16 15:00:00")
+    e.st.update(date="2026-11-16", regime="BEAR")
+    pos = {"strat": "reversal", "qty": 10, "entry": 10000.0, "days": 0, "atr": 1.0, "date_in": "2026-11-16",
+           "high": 10000, "tp_done": False, "tp_order": None, "exiting": False, "stop": 8500.0}
+    e.st["positions"]["000010"] = dict(pos)
+    b.set("000010", 10100)
+    e.closing(None)
+    assert b.sent == [] and "000010" in e.st["positions"]   # 당일 매수분은 그대로 보유
+
+
+def test_holiday_skips_time_exit(tmp_path):
+    e, b, clk = make(tmp_path, "2026-11-16 09:01:00")
+    e.st["positions"]["000010"] = {"strat": "reversal", "qty": 10, "entry": 10000.0, "days": 11, "atr": 1.0,
+                                   "date_in": "2026-11-02", "high": 10000, "tp_done": False, "tp_order": None,
+                                   "exiting": False, "stop": 8500.0}
+    b.set("069500", 30000, volume=0)
+    b.set("000010", 10100)
+    e.open()
+    clk.t = datetime.fromisoformat("2026-11-16 15:00:00")
+    e.closing(None)
+    assert not any(s[1] == "sell" for s in b.sent)
+
+
+def _flat_cache(tmp_path, codes, close=10000.0):
+    idx = pd.bdate_range(end="2026-11-13", periods=150)
+    for code in codes:
+        pd.DataFrame({"open": close, "high": close + 100, "low": close - 100, "close": close, "volume": 1e6,
+                      "value": 1e10}, index=idx).rename_axis("date").to_csv(tmp_path / "daily" / f"{code}.csv")
+
+
+@pytest.mark.parametrize("days,sold", [(0, False), (1, True)])
+def test_connors_ma5_exit_from_next_day(tmp_path, days, sold):
+    e, b, clk = make(tmp_path, "2026-11-16 15:00:00")
+    e.S["reversal"] = Reversal(exit_rule="ma5", max_hold=20)
+    e.st.update(date="2026-11-16", regime="BEAR")
+    _flat_cache(tmp_path, ["000010", "069500"])
+    e.st["positions"]["000010"] = {"strat": "reversal", "qty": 10, "entry": 9500.0, "days": days, "atr": 1.0,
+                                   "date_in": "2026-11-16", "high": 9500, "tp_done": False, "tp_order": None,
+                                   "exiting": False, "stop": 8075.0}
+    b.set("000010", 10500, prev=10000)                      # 종가가 5일선(≈10,100) 위
+    e.closing(None)
+    assert (b.sent == [("000010", "sell", 10, 0)]) is sold
+
+
+def test_connors_ma5_exit_waits_below_ma5_until_max_hold(tmp_path):
+    e, b, clk = make(tmp_path, "2026-11-16 15:00:00")
+    e.S["reversal"] = Reversal(exit_rule="ma5", max_hold=20)
+    e.st.update(date="2026-11-16", regime="BEAR")
+    _flat_cache(tmp_path, ["000010", "069500"])
+    pos = {"strat": "reversal", "qty": 10, "entry": 9500.0, "days": 12, "atr": 1.0, "date_in": "2026-10-29",
+           "high": 9500, "tp_done": False, "tp_order": None, "exiting": False, "stop": 8075.0}
+    e.st["positions"]["000010"] = dict(pos)
+    b.set("000010", 9600, prev=9700)                        # 5일선 아래, 20일 전 → 보유 유지
+    e.closing(None)
+    assert b.sent == []
+
+
+def _crash_frames(mkt_ret5=-0.05):
+    from kis_trader.indicators import add_features
+    idx = pd.bdate_range(end="2026-11-13", periods=150)
+    close = np.full(150, 10000.0)
+    close[-3:] = [8500, 8300, 8200]                          # 3일 전 -15% 폭락 후 추가 하락
+    vol = np.full(150, 1e6)
+    vol[-3] = 5e6                                            # 폭락일 거래량 5배 → 악재성
+    df = pd.DataFrame({"open": close, "high": close * 1.01, "low": close * 0.99, "close": close,
+                       "volume": vol, "value": 1e10}, index=idx)
+    m = pd.DataFrame({"close": 100.0, "ret5": mkt_ret5, "dd20": -0.08, "regime": "BEAR"}, index=idx)
+    return add_features(df), m
+
+
+def test_crash_lookback_excludes_signal_after_idiosyncratic_crash():
+    f, m = _crash_frames()
+    assert bool(Reversal().prepare(f, m)[0].iloc[-1])                 # 기존: 신호일만 보면 통과
+    assert not bool(Reversal(crash_days=5).prepare(f, m)[0].iloc[-1])  # 최근 5일 폭락 → 제외
+
+
+def test_stale_panic_filter_requires_falling_market():
+    f, m = _crash_frames(mkt_ret5=0.05)                               # 지수는 이미 5일 +5% 반등
+    assert bool(Reversal().prepare(f, m)[0].iloc[-1])                  # dd20 만으로 통과하던 경우
+    assert not bool(Reversal(mkt_ret5_max=0.0).prepare(f, m)[0].iloc[-1])
+
+
+def test_ladder_uses_actual_previous_close(tmp_path):
+    e, b, clk = make(tmp_path)
+    e.st.update(plans=[{"strat": "reversal", "code": "000010", "score": 1, "close": 10000, "atr": 300, "range": 400}],
+                regime="BEAR")
+    b.set("000010", 10040, prev=10040, open_=10040)                  # 스캔 종가와 0.4% 차이
+    e.open()
+    assert [p for _, _, _, p in b.sent if True] == [10010, 9980, 9940]   # 실제 전일 종가 기준 -3/-6/-10틱

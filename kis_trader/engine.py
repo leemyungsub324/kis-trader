@@ -96,7 +96,7 @@ class Engine:
             p["days"] += 1
             p["tp_order"] = None
             p["exiting"] = False
-        self.st.update(date=today, orders=[], vb={}, done=[], halt_entries=False, equity0=0)
+        self.st.update(date=today, orders=[], vb={}, done=[], halt_entries=False, equity0=0, holiday=False)
         self.save()
 
     def _once(self, step: str) -> bool:
@@ -231,6 +231,7 @@ class Engine:
         if idx["volume"] <= 0:
             log.info("지수 ETF 거래량 0 → 휴장으로 판단, 오늘은 쉼")
             self.st["halt_entries"] = True
+            self.st["holiday"] = True                   # 마감 단계의 기간만료 매도도 건너뛴다
             for p in self.st["positions"].values():     # 휴장일은 보유일수에서 제외
                 p["days"] = max(p["days"] - 1, 0)
             self.save()
@@ -308,7 +309,8 @@ class Engine:
             if abs(q["prev"] / plan["close"] - 1) > 0.005:
                 log.info("전일 종가 불일치 → %s 건너뜀(오래된 스캔 결과이거나 권리락)", code)
                 continue
-            gap = q["open"] / plan["close"] - 1
+            prev = q["prev"]                    # 스캔 때 받은 종가와 0.5% 안에서 다를 수 있어 실제 전일 종가를 쓴다
+            gap = q["open"] / prev - 1
             if gap < s.gap_min or gap > s.gap_max:
                 log.info("갭 %.1f%% → %s 진입 포기", gap * 100, code)
                 continue
@@ -323,7 +325,7 @@ class Engine:
                 if budget // px >= 1:
                     self._place(code, s.name, "buy", budget // px, px, "entry")
                 continue
-            ref = plan["close"] if s.ladder_ref == "close" else q["price"]
+            ref = prev if s.ladder_ref == "close" else q["price"]
             for lim, w in zip(s.ladder_prices(ref, plan["atr"]), s.ladder_weights):
                 px = max(lim, int(q["lower"]))
                 qty = int(budget * w // px)
@@ -477,6 +479,9 @@ class Engine:
         self._roll_day()
         if not self._once("closing"):
             return
+        if self.st.get("holiday"):
+            log.info("휴장일 → 마감 단계(기간만료·규칙 청산, 종가 진입) 생략")
+            return
         # 1) 미체결 매수 취소
         for o in self.st["orders"]:
             if o["open"] and o["kind"] == "entry":
@@ -499,7 +504,7 @@ class Engine:
             f = add_features(self._with_today(hist, self.b.price(code)))
             mkt = mkt if mkt is not None else self._market()
             _, _, ex = s.prepare(f, mkt.reindex(f.index).ffill())
-            if bool(ex.iloc[-1]):
+            if p["days"] >= 1 and bool(ex.iloc[-1]):    # 규칙 청산은 매수 다음 날부터(백테스트와 같음)
                 self._exit(code, "규칙청산")
         # 3) 종가 진입 전략(종가베팅)
         closers = [s for s in self.S.values() if s.entry == "close" and self.st["regime"] in s.regimes]
@@ -548,6 +553,54 @@ class Engine:
         log.info("종가 진입 후보 %d건", len(cands))
 
     # ------------------------------------------------------------------ 루프
+    def brief(self, t: str) -> bool:
+        """매시 정각(설정 briefing.hours) 시황 브리핑을 텔레그램으로 보낸다. 시각당 한 번, 정각 후 30분까지 허용
+        (마감 스캔 등으로 루프가 늦어져도 보내도록). 실패해도 매매 루프에는 영향을 주지 않는다."""
+        bc = self.cfg.get("briefing")
+        if not bc or not bc.get("enabled", True) or not self.notify.enabled:
+            return False
+        hh, mm = t[:2], t[3:5]
+        hours = [str(h).zfill(2) for h in bc.get("hours", range(9, 16))]
+        if hh not in hours or mm >= "30":
+            return False
+        self._roll_day()
+        if self.st.get("holiday") or not self._once(f"brief{hh}"):
+            return False
+        from .briefing import collect, render
+        try:
+            d = collect(self.b, self.st["positions"], bc.get("min_value", 3e9), bc.get("top", 5))
+            if not d["idx"] or all(i["value"] <= 0 for i in d["idx"].values()):
+                log.info("지수 거래대금 0 → 휴장으로 보고 브리핑 생략")
+                return False
+            at, prev = getattr(self, "_brief_prev", (None, {}))
+            if at is None or (self.now() - at).total_seconds() > 5400:
+                prev = {}                       # 1시간 변화는 같은 날 직전 시각 브리핑이 있을 때만
+            self.notify.send(render(d, self.now().strftime("%m/%d %H:%M"), prev, self.st.get("regime", "")))
+            self._brief_prev = (self.now(), {k: v["price"] for k, v in d["idx"].items()})
+            log.info("시황 브리핑 전송 %s시", hh)
+            return True
+        except Exception:
+            log.exception("시황 브리핑 실패")
+            return False
+        finally:
+            self.save()
+
+    def phase(self, t: str) -> str:
+        """HH:MM → 그 시각에 할 일. 구간 사이(08:45~08:50, 09:00~09:01)는 아무것도 하지 않는다.
+        (예전에는 이 틈이 마감 분기로 떨어져 08:45에 closing 이 돌고, 정작 14:58에는 건너뛰었다.)"""
+        cs = self.cfg.get("close_scan_start", "14:58")
+        if "08:50" <= t < "09:00":
+            return "preopen"
+        if "09:01" <= t < cs:
+            return "intraday"
+        if cs <= t < "15:20":
+            return "closing"
+        if "15:20" <= t < "15:40":
+            return "post"
+        if "15:40" <= t < "18:00":
+            return "eod"
+        return "idle"
+
     def run(self, universe_fn, poll: int = 20):
         """하루 종일 도는 메인 루프. universe_fn()은 종목 목록 DataFrame을 돌려준다."""
         uni, fails = None, 0
@@ -561,18 +614,20 @@ class Engine:
                     continue
                 if uni is None:
                     uni = universe_fn()
-                if "08:50" <= t < "09:00":
+                self.brief(t)
+                step = self.phase(t)
+                if step == "preopen":
                     self.preopen()
-                elif "09:01" <= t < self.cfg.get("close_scan_start", "14:58"):
+                elif step == "intraday":
                     self.open()
                     if not (self.st["halt_entries"] and not self.st["positions"]):
                         self.tick()
-                elif t < "15:20":
+                elif step == "closing":
                     self.closing(uni)
                     self.sync_fills()
-                elif t < "15:40":
+                elif step == "post":
                     self.sync_fills()
-                elif self._once("eod"):
+                elif step == "eod" and self._once("eod"):
                     self.sync_fills()
                     self.eod_scan(uni)
                     uni = None
