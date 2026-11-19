@@ -23,4 +23,6 @@ config.yaml
 heartbeat
 state.json
 trades.csv
-.claude/
+.claude/*
+!.claude/skills/
+reports/
